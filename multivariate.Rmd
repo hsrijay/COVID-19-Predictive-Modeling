@@ -1,0 +1,423 @@
+# Libraries #
+suppressPackageStartupMessages(library(ROCR, warn.conflicts = F))
+suppressPackageStartupMessages(library(glmnet, warn.conflicts = F))
+suppressPackageStartupMessages(library(NMF, warn.conflicts = F))
+suppressPackageStartupMessages(library(plyr, warn.conflicts = F))
+suppressPackageStartupMessages(library(ggplot2, warn.conflicts = F))
+
+# Batch 1 or both batches
+batch_type = 'all' # 'batch1', 'all'
+# Which data to use #
+model_type = 'var' # 'var', 'pan_viral'
+# Outcome type #
+outcome_type = 'cohort' # 'cohort', 'timepoint', 'hospital_status'
+# Standardization #
+sdrd = TRUE # TRUE, FALSE
+
+# Set seed #
+```{r}
+set.seed(4375)
+```
+
+
+
+# Paths #
+```{r}
+path <- "D:/Research/Summer-2020-+DS/"
+code_path <- paste0(path, "code/")
+raw_data_path <- paste0(path, "data/raw_data/")
+readable_data_path <- paste0(path, "data/processed_data/")
+binary_data_path_readin <- paste0(path, "data/processed/", batch_type, "/binary/")
+binary_data_path <- paste0(path, "data/processed/", batch_type, "/binary/rna_", model_type, "/", outcome_type, "/")
+figure_path <- paste0(path, "figures/", batch_type, "/")
+```
+
+
+
+# LASSO #
+```{r}
+lasso_results<-function(data, key, outcome){
+  # unique subjects
+  uniq_subjects = unique(key$subject_id)
+  # store coefficients
+  dat = matrix(NA, nrow = ncol(data)+1, ncol=length(uniq_subjects))
+  rownames(dat) = c("Intercept", colnames(data))
+  # store predicted response
+  glmnet_hat <- rep(NA, nrow(data))
+
+  for(h in 1:length(uniq_subjects)){
+    print(h)
+    # held out subject
+    holdout <- which(key$subject_id == uniq_subjects[h])
+    myglmnet = cv.glmnet(data[-holdout, ], outcome[-holdout], family = "binomial", type.measure="deviance", grouped = FALSE, alpha=1, standardize = TRUE, nfolds = nrow(data))
+    sigmeta <- coef(myglmnet, s = "lambda.min")
+    dat[, h] = matrix(sigmeta)
+    if(length(holdout) == 1){
+      test_data = matrix(data[holdout, ], nrow=1)
+    }else{
+      test_data = data[holdout, ]
+    }
+    glmnet_hat[holdout] <- predict(myglmnet, test_data, type="response", s="lambda.min")
+  }
+  # which covariates were found to be significant
+  lasso_counts = dat
+  lasso_counts[lasso_counts != 0] <- 1
+  # how many times a covariate was found to be significant
+  count_coef = rowSums(lasso_counts)
+  count_coef = count_coef[-1]
+  # which covariates were found to be significant (non-zero)
+  sig_count_coef = count_coef[which(count_coef != 0)]
+  l = list(glmnet_hat, sig_count_coef)
+  return(l)
+}
+```
+
+
+
+# Data #
+```{r}
+readable_data_path <- "D:/Research/Summer-2020-+DS/data/195/processed_data/processing/"
+rna <- read.csv(paste0(readable_data_path, "xpr_nlcpm.csv"))
+rna <- data.frame(rna[, -1], row.names = rna[, 1])
+
+rna <- as.matrix(rna)
+```
+
+# NMF Data#
+```{r}
+rna_nmf_nlcpm <- t(rna_nmf_nlcpm)
+rna_nmf_nlcpm <- as.matrix(rna_nmf_nlcpm)
+rna_nmf_tmm <- t(rna_nmf_tmm@fit@H)
+rna_nmf_tmm <- as.matrix(rna_nmf_tmm)
+```
+
+
+
+# Variance #
+# find variance of all genes
+```{r}
+rna_var <- apply(xpr_nlcpm,2,var)
+```
+
+# order genes by variance
+```{r}
+rna_var <- rna_var[order(rna_var, decreasing=TRUE)]
+# top 500 genes with largest variance
+top_var <- rna_var[1:500]
+# subsetted data
+rna_var <- xpr_nlcpm[, names(top_var)]
+```
+
+
+
+
+
+# Pan Viral Signature #
+```{r}
+pan_viral_genes <- c('ATF3', 'CCL2', 'DDX58', 'DECR1', 'FARP1', 'FPGS', 'GAPDH', 'GBP1', 'HERC5', 'IFI27', 'IFI44', 'IFI44L', 'IFI6', 'IFIT1', 'IFIT2', 'IFIT3', 'IFIT5', 'ISG15', 'LAMP3', 'LY6E', 'MX1', 'OAS1', 'OAS2', 'OAS3', 'OASL', 'PPIA', 'PPIB', 'RPL30', 'RSAD2', 'RTP4', 'SEPT4', 'SERPING1', 'SIGLEC1', 'TNFAIP6', 'TRAP1', 'XAF1')
+# Subset data to only contain pan-viral genes #
+rna_pan_viral = rna[, colnames(rna) %in% pan_viral_genes]
+```
+
+
+
+# Read in key #
+```{r}
+path <- "D:/Research/Summer-2020-+DS/data/195/processed_data/processing/"
+key <- read.csv(paste0(path, "key.csv"))
+
+sx_key <- read.csv(paste0(raw_data_path, "qry_covid_rnaseq_key_demog_analysis(cn 20200512).csv"), check.names=FALSE, stringsAsFactors = FALSE) #qry_covid_rnakeys_MESSI_ALLSYMPTOMS_20200514.csv
+
+sx_key$subject_id <- as.factor(sx_key$subject_id)
+colnames(sx_key)[which(colnames(sx_key) == 'RNA_ID')] = 'rna_id'
+
+dim(key)
+key <- join(key, sx_key[, c('rna_id', 'sx_count', 'sx_severity')], by="rna_id")
+dim(key)
+```
+
+
+
+# RNA data used for training model #
+```{r}
+if(model_type == 'pan_viral'){
+  rna_model = rna_pan_viral
+}else if(model_type == 'var'){
+  rna_model = rna_var
+  
+}
+```
+
+
+
+# RNA key used for training model #
+```{r}
+key$covid_other <- as.character(key$cohort)
+key$covid_other[which(key$cohort != 'COVID-19')] <- 'Other'
+key$covid_other <- factor(key$covid_other, levels=c('COVID-19', 'Other'))
+```
+
+
+#key$response <- as.numeric(mapvalues(key$outcome, from = c("Asymptomatic Non-Shedder", "Symptomatic Shedder"), to = c(0, 1)))
+
+# Number of subjects in training data set #
+```{r}
+num_counts = length(unique(row.names(rna_model)))
+```
+
+
+
+# # Run LASSO model #
+```{r}
+lass_output <- lasso_results(rna_model, key, key$covid_other)
+# # predicted probabilities
+glmnet_hat <- lass_output[[1]]
+# # counts across all iterations for how many times a cytokine is potentially significant
+counts_imp <- lass_output[[2]]
+# 
+# # Save data objects #
+saveRDS(glmnet_hat, file=paste0(readable_data_path, "predprobs_binomial_lasso.rds"))
+saveRDS(counts_imp, file=paste0(readable_data_path, "gene_counts_binomial_lasso.rds"))
+glmnet_hat <- readRDS(paste0(binary_data_path, "predprobs_binomial_lasso.rds"))
+counts_imp <- readRDS(paste0(binary_data_path, "gene_counts_binomial_lasso.rds"))
+save.image(file = "multivariate_binom_wo_auc.RData")
+```
+
+
+
+# AUC #
+```{r}
+pred <- prediction(glmnet_hat, key$covid_other)
+auc <- performance(pred, measure="auc")@y.values[[1]]
+# plot ROC curve
+perf_other <- performance(pred, measure="tpr", x.measure="fpr")
+# png(paste0(figure_path, "processing/model/", model_type, "/auc.png"), width=10, height=10, units="in", res=300)
+# plot(perf, main=paste0("COVID-19 vs All Others (AUC = ", round(auc, 2), ")"), lwd=5)
+# abline(a=0, b=1)
+# dev.off()
+aucData = data.frame(fpr=perf_other@x.values[[1]], tpr=perf_other@y.values[[1]])
+p = ggplot(aucData) #, aes(x=fpr, y=tpr, cohort=cohort
+p = p + geom_line(aes(x=fpr, y=tpr), lwd=1.5)
+p = p + geom_abline(slope=1, intercept = 0)
+p = p + labs(title=paste0("COVID-19 vs All Others (AUC=", round(auc, 2), ")"), x="False Positive Rate", y="True Positive Rate")
+p = p + theme_bw(18)
+p = p + theme(axis.text.x = element_text(angle = 90))
+p = p + theme(plot.title = element_text(size = 18, face="bold", hjust=0.5))
+p = p + theme(plot.subtitle = element_text(size = 14, face="bold", hjust=0.5))
+p
+```
+
+
+ggsave(paste0(figure_path, "processing/model/", model_type, "/", outcome_type, "/auc_other.png"), width=8, height=8, dpi=300, units="in", device="png")
+
+# AUC: healthy, CoV other, Influenza, Bacterial #
+aucData = data.frame()
+factor_type = c("healthy", "CoV other", "Influenza", "Bacterial")
+auc_factor = rep(NA, length(factor_type))
+for(i in 1:length(factor_type)){
+  if(factor_type[i] %in% c('CoV other', 'Bacterial')){
+    pred_tmp <- prediction((1-glmnet_hat[which(key$cohort %in% c('COVID-19', factor_type[i]))]), factor(key$cohort[which(key$cohort %in% c('COVID-19', factor_type[i]))], levels=c('COVID-19', factor_type[i])))
+  }else{
+    pred_tmp <- prediction(glmnet_hat[which(key$cohort %in% c('COVID-19', factor_type[i]))], factor(key$cohort[which(key$cohort %in% c('COVID-19', factor_type[i]))], levels=c('COVID-19', factor_type[i])))
+  }
+  auc_factor[i] <- performance(pred_tmp, measure="auc")@y.values[[1]]
+  perf_tmp <- performance(pred_tmp, measure="tpr", x.measure="fpr")
+  df_tmp <- data.frame(fpr=perf_tmp@x.values[[1]], tpr=perf_tmp@y.values[[1]], cohort=factor_type[i])
+  aucData = rbind(aucData, df_tmp)
+}
+aucData$cohort <- factor(aucData$cohort, levels=c("healthy", "CoV other", "Influenza", "Bacterial"))
+aucData$cohort <- mapvalues(aucData$cohort, from = c("healthy", "CoV other", "Influenza", "Bacterial"), to = paste0(c("healthy", "CoV other", "Influenza", "Bacterial"), " (AUC=", round(auc_factor, 2), ")"))
+# plot
+p = ggplot(aucData) #, aes(x=fpr, y=tpr, cohort=cohort
+p = p + geom_line(aes(x=fpr, y=tpr, colour=cohort), lwd=1.5)
+p = p + scale_colour_manual(values=c("orange", "gold", "darkgreen", "blue"))
+p = p + geom_abline(slope=1, intercept = 0)
+p = p + labs(title="COVID-19 vs All Others: ROC Curves", x="False Positive Rate", y="True Positive Rate")
+p = p + theme_bw(18)
+p = p + theme(axis.text.x = element_text(angle = 90))
+p = p + theme(plot.title = element_text(size = 18, face="bold", hjust=0.5))
+p = p + theme(plot.subtitle = element_text(size = 14, face="bold", hjust=0.5))
+p
+ggsave(paste0(figure_path, "processing/model/", model_type, "/", outcome_type, "/auc_all.png"), width=11, height=8, dpi=300, units="in", device="png")
+
+# Predicted Probabilities for multiple subjects #
+subj_multi_read <- names(which(table(key$subject_id) > 1))
+cov_subj_multi <- unique(key$subject_id[intersect(which(key$subject_id %in% subj_multi_read), which(key$cohort=='COVID-19'))])
+predprob_sub <- (1-glmnet_hat)[which(key$subject_id %in% cov_subj_multi)]
+data_sub <- key[which(key$subject_id %in% cov_subj_multi), c('subject_id', 'days_since_onset')]
+plotData <- data.frame(day=data_sub$days_since_onset, pred_prob=predprob_sub, group=as.factor(data_sub$subject_id))
+p <- ggplot(plotData, aes(x=day, y=pred_prob, group=group))
+p <- p + geom_line(aes(colour=group))
+p <- p + geom_point(aes(colour=group))
+p <- p + labs(title="Predicted Probabilities over Time of\nSubjects with Multiple Readings", x="Day", y="p(COVID-19)")
+p <- p + theme_bw(18)
+p <- p + theme(axis.text.x = element_text(angle = 90, hjust = 1))
+p <- p + theme(plot.title = element_text(size = 20, face="bold", hjust=0.5))
+#p <- p + theme(legend.position="none")
+p
+ggsave(paste0(figure_path, "processing/model/", model_type, "/", outcome_type, "/predprobs_time_multi.png"), width=10, height=6, dpi=300, units="in", device="png")
+
+# Predicted Probabilities for multiple subjects #
+subj_multi_read <- names(which(table(key$subject_id) > 1))
+cov_subj_multi <- unique(key$subject_id[intersect(which(key$subject_id %in% subj_multi_read), which(key$cohort=='COVID-19'))])
+predprob_sub <- log((1-glmnet_hat)[which(key$subject_id %in% cov_subj_multi)] / glmnet_hat[which(key$subject_id %in% cov_subj_multi)])
+data_sub <- key[which(key$subject_id %in% cov_subj_multi), c('subject_id', 'sx_count')]
+plotData <- data.frame(count=data_sub$sx_count, pred_prob=predprob_sub, group=as.factor(data_sub$subject_id))
+p <- ggplot(plotData, aes(x=count, y=pred_prob, group=group))
+p <- p + geom_line(aes(colour=group))
+p <- p + geom_point(aes(colour=group))
+p <- p + labs(title="Predicted Probabilities over Symptom Counts\nof Subjects with Multiple Readings", x="Count", y="log odds ratio of COVID-19") #"logit(p(COVID-19))"
+p <- p + theme_bw(18)
+p <- p + theme(axis.text.x = element_text(angle = 90, hjust = 1))
+p <- p + theme(plot.title = element_text(size = 20, face="bold", hjust=0.5))
+#p <- p + theme(legend.position="none")
+p
+ggsave(paste0(figure_path, "processing/model/", model_type, "/", outcome_type, "/predprobs_sx_count_multi.png"), width=10, height=6, dpi=300, units="in", device="png")
+
+# Predicted Probabilities #
+key$cohort <- factor(key$cohort, levels=c("COVID-19", "healthy", "CoV other", "Influenza", "Bacterial"))
+predProb=data.frame(predicted_prob=(1-glmnet_hat), group=factor(key$cohort, levels=c("COVID-19", "healthy", "CoV other", "Influenza", "Bacterial")))
+p = ggplot(predProb, aes(x=group, y=predicted_prob, fill=group))
+p = p + geom_boxplot(outlier.shape = NA)
+p = p + scale_fill_manual(labels = levels(key$cohort), values=c("pink", "peachpuff", "lightgoldenrodyellow", "lightgreen", "lightblue"), guide=FALSE)
+p = p + geom_jitter(aes(colour=group), position = position_jitter(width = 0.1), size=1)
+p = p + scale_color_manual(labels = levels(key$cohort), values = c("red", "orange", "gold", "darkgreen", "blue"))
+p = p + labs(title=paste("LOOCV Predicted Probabilities"), x="group", y="p(COVID-19)")
+p = p + theme_bw(18)
+p = p + theme(axis.text.x = element_text(angle = 90))
+p = p + theme(plot.title = element_text(size = 18, face="bold", hjust=0.5))
+p = p + theme(plot.subtitle = element_text(size = 14, face="bold", hjust=0.5))
+p
+ggsave(paste0(figure_path, "processing/model/", model_type, "/", outcome_type, "/predprobs_all.png"), width=10, height=6, dpi=300, units="in", device="png")
+
+# Counts of Potentially Significant Covariates #
+plotData = data.frame(sig_count_coef = counts_imp)
+plotData$sig_count_coef = plotData$sig_count_coef / length(unique(key$subject_id))
+plotData$gene <- rownames(plotData)
+plotData <- plotData[order(plotData$sig_count_coef, decreasing=TRUE),]
+if(model_type == 'var'){
+  plotData <- plotData[1:60,]
+}
+plotData$gene <- factor(plotData$gene, levels=plotData$gene)
+# plot of missingness with text noting what percentage of metabolites have missingness above 50%
+p <- ggplot(plotData, aes(x=gene, y=sig_count_coef, group=gene))
+p <- p + geom_bar(stat="identity")
+#p <- p + geom_text(aes(label=gene, angle=90), hjust=-0.1)
+p <- p + labs(title=paste0("Frequency of Potentially Significant Transcripts"), y="Frequency", x="Transcripts")
+p <- p + theme_bw(18)
+p <- p + theme(axis.text.x = element_text(size = 10, angle=90))
+p <- p + theme(plot.title = element_text(size = 15, face="bold", hjust=0.5))
+p
+ggsave(paste0(figure_path, "processing/model/", model_type, "/", outcome_type, "/gene_counts.png"), width=10, height=6, dpi=300, units="in", device="png")
+
+# # Predicted Probabilities #
+# predProb=data.frame(predicted_prob=(1-glmnet_hat)[which(key$cohort %in% c('COVID-19', 'healthy'))], group=factor(key$cohort[which(key$cohort %in% c('COVID-19', 'healthy'))], levels=c('COVID-19', 'healthy')))
+# p = ggplot(predProb, aes(x=group, y=predicted_prob, fill=group))
+# p = p + geom_boxplot(outlier.shape = NA)
+# p = p + scale_fill_manual(labels = levels(factor(key$cohort[which(key$cohort %in% c('COVID-19', 'healthy'))], levels=c('COVID-19', 'healthy'))), values=c("pink", "lightblue"), guide=FALSE)
+# p = p + geom_jitter(aes(colour=group), position = position_jitter(width = 0.1), size=1)
+# p = p + scale_color_manual(labels = levels(factor(key$cohort[which(key$cohort %in% c('COVID-19', 'healthy'))], levels=c('COVID-19', 'healthy'))), values = c("red", "blue"))
+# p = p + labs(title=paste("LOOCV Predicted Probabilities"), x="group", y="p(COVID-19)")
+# p = p + theme_bw(18)
+# p = p + theme(axis.text.x = element_text(angle = 90))
+# p = p + theme(plot.title = element_text(size = 18, face="bold", hjust=0.5))
+# p = p + theme(plot.subtitle = element_text(size = 14, face="bold", hjust=0.5))
+# p
+# ggsave(paste0(figure_path, "processing/model/", model_type, "/predprobs_healthy.png"), width=10, height=6, dpi=300, units="in", device="png")
+
+## Multinomial ##
+
+# Lasso #
+```{r}
+lasso_multi<-function(data, key, outcome){
+  # unique subjects
+  uniq_subjects = unique(key$subject_id)
+  # store coefficients
+#  dat = matrix(NA, nrow = ncol(data)+1, ncol=length(uniq_subjects))
+#  rownames(dat) = c("Intercept", colnames(data))
+  # store predicted response
+  glmnet_hat <- matrix(NA, nrow = nrow(data),ncol = 5)
+
+  for(h in 1:length(uniq_subjects)){
+    print(h)
+    # held out subject
+    holdout <- which(key$subject_id == uniq_subjects[h])
+    myglmnet = cv.glmnet(data[-holdout, ], outcome[-holdout], family = "multinomial",    type.measure = "deviance", parallel = TRUE, grouped = FALSE, alpha=1, standardize = TRUE, nfolds = nrow(data))
+#    sigmeta <- coef(myglmnet, s = "lambda.min")
+ #   dat[, h] = matrix(sigmeta)
+    if(length(holdout) == 1){
+      test_data = matrix(data[holdout, ], nrow=1)
+    }else{
+      test_data = data[holdout, ]
+    }
+    glmnet_hat[holdout,] <- predict(myglmnet, test_data, type="response", s="lambda.min")
+  }
+  # which covariates were found to be significant
+#  lasso_counts = dat
+#  lasso_counts[lasso_counts != 0] <- 1
+  # how many times a covariate was found to be significant
+#  count_coef = rowSums(lasso_counts)
+#  count_coef = count_coef[-1]
+  # which covariates were found to be significant (non-zero)
+#  sig_count_coef = count_coef[which(count_coef != 0)]
+#  l = list(glmnet_hat, sig_count_coef)
+  return(list(glmnet_hat))
+}
+```
+
+```{r}
+
+ myglmnet = cv.glmnet(rna_nmf_tmm[-87, ], key$group[-87], family = "multinomial",    type.measure = "deviance", parallel = TRUE, grouped = FALSE, alpha=1, standardize = TRUE, nfolds = nrow(rna_nmf_tmm))
+predict(myglmnet, matrix(rna_nmf_tmm[87, ], nrow=1), type="response", s="lambda.min")
+x <- coef(myglmnet, s = "lambda.min")
+b <- cv.glmnet(rna_model[-5, ], key$covid_other[-5], family = "binomial",    type.measure = "deviance", grouped = FALSE, alpha=1, standardize = TRUE, nfolds = nrow(rna_model))
+coef(b, s = "lambda.min")
+```
+
+# RNA key used for training model #
+```{r}
+key$cohort <- factor(key$cohort, levels = c('Bacterial', 'Influenza', 'CoV other', 'COVID-19', 'healthy'))
+```
+
+# # Run LASSO model #
+```{r}
+lass_multi_output <- lasso_multi(rna, key, key$cohort)
+lass_multi_nmf_output <- lasso_multi(rna_nmf_tmm, key, key$cohort)
+
+# # predicted probabilities
+glmulti_hat <- as.data.frame(lass_multi_output[[1]])
+
+glmulti_hat <- glmulti_hat %>%
+  mutate(subject_id = key$subject_id)
+names(glmulti_hat) <- c('Bacterial', 'Influenza', 'CoV other', 'COVID-19', 'healthy', 'subject_id')
+
+
+
+glmulti_hat <- glmulti_hat %>%
+  mutate(prediction = colnames(glmulti_hat)[apply(glmulti_hat,1,which.max)])
+glmulti_hat$prediction <- factor(glmulti_hat$prediction, levels = c('Bacterial', 'Influenza', 'CoV other', 'COVID-19', 'healthy'))
+
+# # counts across all iterations for how many times a cytokine is potentially significant
+counts_imp <- lass_output[[2]]
+# 
+
+# # Save data objects #
+write.csv(glmulti_hat, file = "D:/Research/Summer-2020-+DS/data/195/processed_data/processing/original_data_predprobs.csv")
+saveRDS(glmulti_hat, file=paste0(path, "gene2vec/200_dim_glmnet_auc_predprobs.rds"))
+saveRDS(counts_imp, file=paste0(readable_data_path, "gene_counts_binomial_lasso.rds"))
+glmnet_hat <- readRDS(paste0(binary_data_path, "predprobs_binomial_lasso.rds"))
+counts_imp <- readRDS(paste0(binary_data_path, "gene_counts_binomial_lasso.rds"))
+save.image(file = "multivariate.RData")
+```
+
+# Confusion Matrix
+```{r, fig.height = 4, fig.width = 5}
+
+#confusion matrix
+cm <- confusionMatrix(glmulti_hat$prediction, key$cohort)
+par(mar=c(5.1, 4.1, 4.1, 2.1))
+
+heatmap.2(as.matrix(cm), cexRow = 1, cexCol = 1, trace = "none", scale = "row", xlab = "Actual", margins = c(6.5,6.5), col = colorRampPalette(c("black","white","red")),dendrogram = "col", ylab = "Prediction", density.info = NULL, keysize = 2, Colv = FALSE, Rowv = FALSE)
+saveRDS(glmulti_hat, file = "nmf_auc_predprobs_33.rds")
+```
+
